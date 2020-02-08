@@ -1,0 +1,203 @@
+---
+title: "Transformation activity scores (TASs) for FGFR1-4 variants"
+author: "Masachika Ikegami"
+date: "5/15/2019"
+output:
+  pdf_document:
+    fig_caption: yes
+    latex_engine: xelatex
+    number_sections: yes
+    toc: true
+  html_document:
+    df_print: paged
+    toc: yes
+header-includes:
+- \usepackage{amsmath,amssymb}
+- \usepackage{mathspec}
+- \setlength{\mathindent}{0pt} 
+classoption: xelatex,ja=standard,fleqn 
+---
+\pagebreak
+
+# Setting up
+```{r setup, results='hide'}
+Working = "home/TAS"
+
+knitr::opts_chunk$set(message=FALSE)
+knitr::opts_chunk$set(tidy=TRUE)
+knitr::opts_chunk$set(warning=FALSE)
+knitr::opts_chunk$set(error=FALSE)
+knitr::opts_chunk$set(fig.width=12, fig.height=6, fig.align='center', fig.pos='H', out.extra='', tidy.opts = list(width.cutoff = 45))
+knitr::opts_knit$set(root.dir=Working)
+setwd(Working)
+
+options(scipen=100)
+library(stringr)
+library(rstan)
+library(tidyverse)
+library(reshape2)
+library(shinystan)
+library(codetools)
+
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+# Loading the experimental results of focus formation assay and low-serum cell proliferation assay
+```{r}
+filename = "Data.csv"
+v_list = NULL
+N = NULL
+V = NULL
+I = 4
+FFA_Data = read.csv(file = filename, stringsAsFactors=F)
+FFA_Data$Name = str_replace_all(FFA_Data$Name, pattern="\\*", replacement="STOP")
+FFA_Data$AA = str_sub(FFA_Data$Name, 1,-3)
+v_l = unique(FFA_Data$AA)
+anchor = "FGFR1_WT"
+v_l2 = v_l[-which(v_l %in% anchor)]
+v_list =　c(anchor,v_l2)
+N = length(FFA_Data$score)
+V = length(v_list)
+var_num = rep(0,N)
+for(k in 1:N){
+  for(j in 1:V){
+    if(FFA_Data$AA[k] == v_list[j]){
+      var_num[k] = j
+    }
+  }
+}
+FFA_Data = cbind(FFA_Data, var_num)
+```
+
+# Ordered logit model simulation code in Stan language
+```{r}
+stan_code_F <- "
+data{
+  int I;            // Number of classes
+  int N;            // Number of measurements
+  int B[N];         // Batches of each measurement
+  int BN;           // Number of the batches
+  int V;            // Number of the variants
+  int Y[N];         // Results of each measurement 
+  int variant[N];   // Variant ID of each 
+}
+
+parameters{
+    ordered[I-1] d;   // Thresholds for the ordered logit model
+    simplex[V] eta;      // Functional scores of each variant
+    vector[BN] be_t;    // Batch-specific random effects, intercept
+    vector<lower=0>[BN] tau;  // Batch-specific random effects, slope
+}
+transformed parameters{
+    vector[BN] bet;
+    bet[1] = -tau[1]/V;
+    for(b in 2:BN){
+      bet[b] = be_t[b];
+    }
+}
+model{
+  for(n in 1:N){
+    Y[n] ~ ordered_logistic(bet[B[n]]+tau[B[n]]*eta[variant[n]], d);
+  }
+}
+
+generated quantities{
+  vector[V] Delta_Eta;
+  for(v in 1:V){
+    Delta_Eta[v] = eta[v]-eta[1];
+  }
+}
+
+"
+write(stan_code_F, file="stan_code_FGFR.stan")
+stanmodel_F <- stan_model(file="stan_code_FGFR.stan")
+```
+
+## Execution of Hamiltonian Monte Carlo simulation
+Change "chains", "iter", "warmup" referring to R-hat values and posterior expectations. 
+```{r,eval=FALSE}
+fit_FFA = NULL
+HMC_data <- list(N = N, V = V, I = I,
+                  Y = FFA_Data$score, variant = FFA_Data$var_num, 
+                  B = FFA_Data$batch, BN = max(FFA_Data$batch))
+fit <- stan(file="stan_code_FGFR.stan", data=HMC_data,
+            control=list(adapt_delta=0.9999, max_treedepth = 20),
+            seed=1234, chains=4, iter=3500, warmup=1500, thin=2)
+fit_FFA = fit
+```
+
+# Quality check 
+Judge the convergence of simulation if R-hat values of all parameters are < 1.1 or not.
+```{r eval=FALSE}
+launch_shinystan(fit_FFA)
+```
+
+## Simulation summary 
+```{r}
+DF = NULL
+DF_eta = NULL
+DF_d = NULL
+df_eta <- subset(summary(fit_FFA,probs = c(0.025, 0.05, 0.50, 0.95, 0.975))$summary, grepl("eta",
+                rownames(summary(fit_FFA,probs = c(0.025, 0.05, 0.50, 0.95, 0.975))$summary)))
+df_Eta <- subset(summary(fit_FFA,probs = c(0.025, 0.05, 0.50, 0.95, 0.975))$summary, grepl("Eta",
+                rownames(summary(fit_FFA,probs = c(0.025, 0.05, 0.50, 0.95, 0.975))$summary)))
+df_d <- subset(summary(fit_FFA,probs = c(0.025, 0.05, 0.50, 0.95, 0.975))$summary, grepl("d",
+                rownames(summary(fit_FFA,probs = c(0.025, 0.05, 0.50, 0.95, 0.975))$summary)))
+df_beta <- subset(summary(fit_FFA,probs = c(0.025, 0.05, 0.50, 0.95, 0.975))$summary, grepl("bet",
+                rownames(summary(fit_FFA,probs = c(0.025, 0.05, 0.50, 0.95, 0.975))$summary)))
+df_tau <- subset(summary(fit_FFA,probs = c(0.025, 0.05, 0.50, 0.95, 0.975))$summary, grepl("tau",
+                rownames(summary(fit_FFA,probs = c(0.025, 0.05, 0.50, 0.95, 0.975))$summary)))
+df_ <- rbind(df_eta,df_Eta,df_d,df_tau,df_beta)
+DF = df_
+DF_eta = df_eta
+DF_d = df_d
+```
+
+## Sampling from posterior distribution and estimating TAS
+Draw 500 parameter samples from the trace randomly, then generate  values, taking batch-to-batch ratio into account. 
+```{r}
+FFA_result = NULL
+len <- length(v_list)
+eta <- NULL
+eta$ave <- DF_eta[1:len]
+eta$name <- v_list
+repN <- 500
+BN <- max(FFA_Data$batch)
+BN_ <- NULL
+for(j in 1:BN){
+  BN_ <- c(BN_,length(subset(FFA_Data, batch == j)$batch))
+}
+NY <- length(v_list)
+p_Y <- array(0,c(repN, BN, NY))
+d.ext<-rstan::extract(fit_FFA)
+for(k in 1:repN){
+  for(j in 1: NY){
+    tmp <- 0
+    for(l in 1: BN){
+      p_Y[k,l,j] = p_Y[k,l,j]  + (d.ext$bet[k,l] + d.ext$tau[k,l]*d.ext$eta[k,j]) * BN_[l] * BN / sum(BN_)
+    }
+  }
+}
+eta$le95 <- DF_eta[(len*3+1):(len*4)]
+eta$ue95 <- DF_eta[(len*7+1):(len*8)]
+y_ave <- rep(0,len)
+y_class <- rep(4,len)
+
+for(j in 1:len){
+  y_ave[j] <- mean(p_Y[,,j])
+  eta$ue95[j] <- t.test(p_Y[,,j])[4]$conf.int[2]
+  eta$le95[j] <- t.test(p_Y[,,j])[4]$conf.int[1]
+  if(y_ave[j] < DF_d[3])
+      y_class[j] <- 3
+  if(y_ave[j] < DF_d[2])
+      y_class[j] <- 2
+  if(y_ave[j] < DF_d[1])
+      y_class[j] <- 1
+}
+eta$y_ave <- y_ave
+eta$y_class <- y_class
+filename <- "FGFR-FFA_score.tsv"
+write.table(eta, file=filename, sep='\t',
+          quote=FALSE, col.names=NA)
+```
